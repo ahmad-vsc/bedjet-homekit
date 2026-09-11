@@ -22,6 +22,7 @@ export type TransportState = 'DISCONNECTED' | 'CONNECTING' | 'SUBSCRIBING' | 'RE
 export interface TransportOptions {
   statusTimeoutMs?: number;
   maxBackoffMs?: number;
+  connectTimeoutMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -47,6 +48,7 @@ export class BedJetTransport extends EventEmitter {
 
   private readonly statusTimeoutMs: number;
   private readonly maxBackoffMs: number;
+  private readonly connectTimeoutMs: number;
   private readonly log: (msg: string) => void;
 
   constructor(
@@ -57,6 +59,7 @@ export class BedJetTransport extends EventEmitter {
     super();
     this.statusTimeoutMs = opts.statusTimeoutMs ?? 300_000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 60_000;
+    this.connectTimeoutMs = opts.connectTimeoutMs ?? 45_000;
     this.log = opts.log ?? (() => undefined);
   }
 
@@ -99,7 +102,7 @@ export class BedJetTransport extends EventEmitter {
     try {
       await this.teardown();
       this.setState('CONNECTING');
-      const connection = await this.ble.connect(this.mac);
+      const connection = await this.connectWithTimeout();
       if (this.stopped) {
         // stop() ran while we were suspended waiting on connect(); this
         // connection was never ours to keep. Disconnect it and bail out
@@ -138,6 +141,42 @@ export class BedJetTransport extends EventEmitter {
         this.enqueueRecycle();
       }, delay);
     }
+  }
+
+  /**
+   * Bounds `ble.connect()` so a stuck BlueZ/D-Bus call can never hang the
+   * queue (and therefore `stop()`) forever — defense in depth even though
+   * providers are expected to have their own timeouts. If the underlying
+   * connect settles after the timeout already fired, it's an orphan: a late
+   * resolve gets disconnected, a late reject is swallowed.
+   */
+  private connectWithTimeout(): Promise<BleConnection> {
+    return new Promise<BleConnection>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        reject(new Error('connect timed out'));
+      }, this.connectTimeoutMs);
+      this.ble.connect(this.mac).then(
+        (connection) => {
+          clearTimeout(timer);
+          if (settled) {
+            connection.disconnect().catch(() => undefined);
+            return;
+          }
+          settled = true;
+          resolve(connection);
+        },
+        (err) => {
+          clearTimeout(timer);
+          if (settled) {
+            return;
+          }
+          settled = true;
+          reject(err);
+        },
+      );
+    });
   }
 
   private onUnsolicitedDisconnect(connection: BleConnection): void {

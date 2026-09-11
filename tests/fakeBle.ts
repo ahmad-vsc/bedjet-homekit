@@ -53,7 +53,10 @@ export class FakeBleProvider implements BleProvider {
   public failNextConnects = 0;
   /** Opt-in: connect() never resolves on its own; caller drives it via pendingConnects. */
   public manualConnect = false;
-  public pendingConnects: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
+  public pendingConnects: Array<{
+    resolve: (conn?: FakeConnection) => void;
+    reject: (err: Error) => void;
+  }> = [];
 
   async connect(_mac: string): Promise<BleConnection> {
     if (this.failNextConnects > 0) {
@@ -63,10 +66,10 @@ export class FakeBleProvider implements BleProvider {
     if (this.manualConnect) {
       return new Promise<BleConnection>((resolve, reject) => {
         this.pendingConnects.push({
-          resolve: () => {
-            const conn = new FakeConnection();
-            this.connections.push(conn);
-            resolve(conn);
+          resolve: (conn?: FakeConnection) => {
+            const c = conn ?? new FakeConnection();
+            this.connections.push(c);
+            resolve(c);
           },
           reject,
         });

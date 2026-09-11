@@ -1,7 +1,7 @@
 // tests/transport.test.ts
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BedJetTransport } from '../src/bedjet/transport';
-import { FakeBleProvider } from './fakeBle';
+import { FakeBleProvider, FakeConnection } from './fakeBle';
 import { makeStatusPacket } from './fixtures';
 
 // Fake timers for backoff/watchdog, but leave microtasks/setImmediate real
@@ -158,5 +158,64 @@ describe('BedJetTransport connection lifecycle', () => {
     expect(ble.connections).toHaveLength(2); // exactly one reconnect
     expect(t.state).toBe('READY');
     await t.stop();
+  });
+
+  it('times out a stuck connect() and retries with backoff', async () => {
+    const ble = new FakeBleProvider();
+    ble.manualConnect = true;
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    expect(ble.pendingConnects).toHaveLength(1); // suspended at ble.connect()
+
+    await vi.advanceTimersByTimeAsync(45_000); // connect timeout fires
+    await flush();
+    expect(t.state).toBe('DISCONNECTED');
+
+    ble.manualConnect = false; // let the next attempt succeed normally
+    await vi.advanceTimersByTimeAsync(1000); // first backoff retry
+    await flush();
+    expect(t.state).toBe('READY');
+    await t.stop();
+  });
+
+  it('disconnects a connection that resolves after the connect timeout fired', async () => {
+    const ble = new FakeBleProvider();
+    ble.manualConnect = true;
+    const t = makeTransport(ble);
+    const states: string[] = [];
+    t.on('state', (s: string) => states.push(s));
+    t.start();
+    await flush();
+    expect(ble.pendingConnects).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(45_000); // connect timeout fires
+    await flush();
+    expect(t.state).toBe('DISCONNECTED');
+
+    // The original pending connect resolves late, after the timeout already fired.
+    const lateConnection = new FakeConnection();
+    ble.pendingConnects[0].resolve(lateConnection);
+    await flush();
+
+    expect(lateConnection.disconnected).toBe(true); // orphan cleaned up
+    expect(states).not.toContain('READY'); // late resolution never affected state
+    await t.stop();
+  });
+
+  it('stop() unblocks after a stuck connect() times out', async () => {
+    const ble = new FakeBleProvider();
+    ble.manualConnect = true;
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    expect(ble.pendingConnects).toHaveLength(1);
+
+    const stopping = t.stop();
+    await vi.advanceTimersByTimeAsync(45_000); // connect timeout fires
+    await flush();
+    await stopping; // must resolve, not hang forever
+
+    expect(t.state).toBe('DISCONNECTED');
   });
 });
