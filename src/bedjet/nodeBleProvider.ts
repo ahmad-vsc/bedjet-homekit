@@ -87,8 +87,11 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
           const service = await gatt.getPrimaryService(serviceUuid);
           const characteristic = await service.getCharacteristic(charUuid);
           return {
-            // 'request' = write-with-response, so ATT errors surface to us.
-            write: (data) => characteristic.writeValue(data, { offset: 0, type: 'request' }),
+            // The BedJet command characteristic is write-WITHOUT-response
+            // (ESPHome uses ESP_GATT_WRITE_TYPE_NO_RSP). Writing with response
+            // ('request') is rejected by the device and surfaces as a spurious
+            // "Not connected" error, so use 'command' (no response).
+            write: (data) => characteristic.writeValue(data, { offset: 0, type: 'command' }),
             subscribe: async (onData) => {
               characteristic.on('valuechanged', onData);
               await characteristic.startNotifications();
