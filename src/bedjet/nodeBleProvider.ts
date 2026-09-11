@@ -1,6 +1,11 @@
 import { execFile } from 'child_process';
+import { existsSync } from 'fs';
 import { createBluetooth } from 'node-ble';
 import { BleConnection, BleProvider } from './transport';
+
+// Absolute path avoids depending on the systemd service PATH; fall back to a
+// bare PATH lookup for non-standard installs.
+const BLUETOOTHCTL = existsSync('/usr/bin/bluetoothctl') ? '/usr/bin/bluetoothctl' : 'bluetoothctl';
 
 /**
  * Power-cycles the default BLE controller via bluetoothctl (which talks to
@@ -9,7 +14,7 @@ import { BleConnection, BleProvider } from './transport';
  */
 export function resetBluetoothAdapter(): Promise<void> {
   const run = (args: string[]): Promise<void> =>
-    new Promise((resolve) => execFile('bluetoothctl', args, { timeout: 8_000 }, () => resolve()));
+    new Promise((resolve) => execFile(BLUETOOTHCTL, args, { timeout: 8_000 }, () => resolve()));
   const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
   return run(['power', 'off'])
     .then(() => wait(2_000))
