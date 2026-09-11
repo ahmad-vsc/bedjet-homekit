@@ -320,39 +320,31 @@ describe('BedJetTransport write path', () => {
   });
 });
 
-describe('BedJetTransport initial status read', () => {
-  it('seeds state by reading the status characteristic after subscribing', async () => {
+describe('BedJetTransport hung-operation recovery', () => {
+  it('does not wedge forever when a GATT op hangs; times out and retries', async () => {
     const ble = new FakeBleProvider();
-    ble.manualConnect = true;
-    const t = makeTransport(ble);
-    const received: Buffer[] = [];
-    t.on('status', (b: Buffer) => received.push(b));
+    const t = new BedJetTransport(ble, 'AA:BB:CC:DD:EE:FF', {
+      statusTimeoutMs: 300_000,
+      maxBackoffMs: 60_000,
+      opTimeoutMs: 20_000,
+    });
+    // First connection: subscribe() hangs forever (wedged D-Bus call).
+    ble.connectHook = (conn) => { conn.statusChar.hangSubscribe = true; };
     t.start();
     await flush();
-    const conn = new FakeConnection();
-    conn.statusChar.readValue = makeStatusPacket();
-    ble.pendingConnects.shift()!.resolve(conn);
-    await flush();
-    expect(t.state).toBe('READY');
-    expect(received).toHaveLength(1); // read-seeded, no notification needed
-    expect(received[0][1]).toBe(0x56);
-    await t.stop();
-  });
+    expect(t.state).toBe('SUBSCRIBING'); // stuck partway through connect
 
-  it('still reaches READY when the initial read fails', async () => {
-    const ble = new FakeBleProvider();
-    ble.manualConnect = true;
-    const t = makeTransport(ble);
-    const received: Buffer[] = [];
-    t.on('status', (b: Buffer) => received.push(b));
-    t.start();
+    // The op timeout fires, the attempt fails, and backoff is scheduled —
+    // the queue is NOT permanently blocked.
+    await vi.advanceTimersByTimeAsync(20_000);
     await flush();
-    const conn = new FakeConnection();
-    conn.statusChar.failReads = true;
-    ble.pendingConnects.shift()!.resolve(conn);
+    expect(t.state).toBe('DISCONNECTED');
+
+    // Next attempt has a healthy subscribe and reaches READY.
+    ble.connectHook = undefined;
+    await vi.advanceTimersByTimeAsync(1000); // first backoff delay
     await flush();
     expect(t.state).toBe('READY');
-    expect(received).toHaveLength(0);
     await t.stop();
   });
 });

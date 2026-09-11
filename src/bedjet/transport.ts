@@ -5,7 +5,6 @@ import { OperationQueue } from './queue';
 export interface BleCharacteristic {
   write(data: Buffer): Promise<void>;
   subscribe(onData: (data: Buffer) => void): Promise<void>;
-  read(): Promise<Buffer>;
 }
 
 export interface BleConnection {
@@ -24,11 +23,14 @@ export interface TransportOptions {
   statusTimeoutMs?: number;
   maxBackoffMs?: number;
   connectTimeoutMs?: number;
+  /** Ceiling for any single post-connect GATT op (subscribe, write, disconnect). */
+  opTimeoutMs?: number;
   log?: (msg: string) => void;
 }
 
 const INITIAL_BACKOFF_MS = 1000;
 const WATCHDOG_INTERVAL_MS = 15_000;
+const DEFAULT_OP_TIMEOUT_MS = 20_000;
 
 /**
  * Owns the single BLE connection to a BedJet. All GATT operations are
@@ -50,6 +52,7 @@ export class BedJetTransport extends EventEmitter {
   private readonly statusTimeoutMs: number;
   private readonly maxBackoffMs: number;
   private readonly connectTimeoutMs: number;
+  private readonly opTimeoutMs: number;
   private readonly log: (msg: string) => void;
 
   constructor(
@@ -61,6 +64,7 @@ export class BedJetTransport extends EventEmitter {
     this.statusTimeoutMs = opts.statusTimeoutMs ?? 300_000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 60_000;
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 45_000;
+    this.opTimeoutMs = opts.opTimeoutMs ?? DEFAULT_OP_TIMEOUT_MS;
     this.log = opts.log ?? (() => undefined);
   }
 
@@ -102,7 +106,7 @@ export class BedJetTransport extends EventEmitter {
         throw new Error('BedJet is not connected');
       }
       try {
-        await this.commandChar.write(data);
+        await this.withTimeout(this.commandChar.write(data), 'write');
       } catch (err) {
         this.log(`write failed (${(err as Error).message}); reconnecting to retry`);
         // Already inside the queue slot, so call recycleNow directly —
@@ -111,7 +115,7 @@ export class BedJetTransport extends EventEmitter {
         if (this.stateValue !== 'READY' || !this.commandChar) {
           throw new Error('BedJet is not connected');
         }
-        await this.commandChar.write(data);
+        await this.withTimeout(this.commandChar.write(data), 'write');
       }
     }, coalesceKey);
   }
@@ -143,21 +147,18 @@ export class BedJetTransport extends EventEmitter {
       this.connection = connection;
       connection.onDisconnect(() => this.onUnsolicitedDisconnect(connection));
       this.setState('SUBSCRIBING');
-      const statusChar = await connection.getCharacteristic(BEDJET_SERVICE_UUID, STATUS_CHAR_UUID);
-      await statusChar.subscribe((data) => this.onStatus(data));
-      this.commandChar = await connection.getCharacteristic(BEDJET_SERVICE_UUID, COMMAND_CHAR_UUID);
-      // The BedJet barely notifies while idle, so without an explicit initial
-      // read the accessory would have no state (and report unreachable) until
-      // the device is turned on at the unit. Failure is tolerable: a
-      // notification will seed state instead once the device speaks.
-      try {
-        const initial = await statusChar.read();
-        if (initial.length > 0) {
-          this.onStatus(initial);
-        }
-      } catch {
-        this.log('initial status read failed; waiting for notifications');
-      }
+      // Every post-connect GATT call is bounded: a hung BlueZ/D-Bus op here
+      // would otherwise block the single queue (and every future command)
+      // forever. On timeout we reject into the catch below and retry.
+      const statusChar = await this.withTimeout(
+        connection.getCharacteristic(BEDJET_SERVICE_UUID, STATUS_CHAR_UUID), 'get status char');
+      await this.withTimeout(
+        statusChar.subscribe((data) => this.onStatus(data)), 'subscribe');
+      this.commandChar = await this.withTimeout(
+        connection.getCharacteristic(BEDJET_SERVICE_UUID, COMMAND_CHAR_UUID), 'get command char');
+      // No initial read: the BedJet's status characteristic is notify-only, and
+      // the client already presents a reachable Off state until the first
+      // notification arrives (which the device sends once it's turned on).
       this.backoffMs = INITIAL_BACKOFF_MS;
       this.lastStatusAt = Date.now();
       // A stray timer can still be pending here if this success came from a
@@ -191,27 +192,45 @@ export class BedJetTransport extends EventEmitter {
 
   /**
    * Bounds `ble.connect()` so a stuck BlueZ/D-Bus call can never hang the
-   * queue (and therefore `stop()`) forever — defense in depth even though
-   * providers are expected to have their own timeouts. If the underlying
-   * connect settles after the timeout already fired, it's an orphan: a late
-   * resolve gets disconnected, a late reject is swallowed.
+   * queue (and therefore `stop()`) forever. A connect that resolves after the
+   * timeout fired is an orphan connection and gets disconnected.
    */
   private connectWithTimeout(): Promise<BleConnection> {
-    return new Promise<BleConnection>((resolve, reject) => {
+    return this.withTimeout(
+      this.ble.connect(this.mac),
+      'connect',
+      this.connectTimeoutMs,
+      (connection) => connection.disconnect().catch(() => undefined),
+    );
+  }
+
+  /**
+   * Races a BLE operation against a timeout so one wedged D-Bus call cannot
+   * block the single command queue forever. On timeout the returned promise
+   * rejects; the underlying op is abandoned (its late settle is swallowed, or
+   * handed to `onOrphan` for cleanup — e.g. disconnecting a late connection).
+   */
+  private withTimeout<T>(
+    op: Promise<T>,
+    label: string,
+    ms: number = this.opTimeoutMs,
+    onOrphan?: (value: T) => void,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => {
         settled = true;
-        reject(new Error('connect timed out'));
-      }, this.connectTimeoutMs);
-      this.ble.connect(this.mac).then(
-        (connection) => {
+        reject(new Error(`${label} timed out`));
+      }, ms);
+      op.then(
+        (value) => {
           clearTimeout(timer);
           if (settled) {
-            connection.disconnect().catch(() => undefined);
+            onOrphan?.(value);
             return;
           }
           settled = true;
-          resolve(connection);
+          resolve(value);
         },
         (err) => {
           clearTimeout(timer);
@@ -261,9 +280,10 @@ export class BedJetTransport extends EventEmitter {
     this.connection = null;
     if (connection) {
       try {
-        await connection.disconnect();
+        await this.withTimeout(connection.disconnect(), 'disconnect');
       } catch {
-        // Already gone — that's fine.
+        // Already gone, or the disconnect itself hung past its timeout — either
+        // way we drop this connection object and move on.
       }
     }
   }

@@ -52,7 +52,6 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
               characteristic.on('valuechanged', onData);
               await characteristic.startNotifications();
             },
-            read: () => characteristic.readValue(),
           };
         },
         async disconnect() {

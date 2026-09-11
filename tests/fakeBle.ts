@@ -14,19 +14,14 @@ export class FakeCharacteristic implements BleCharacteristic {
     this.writes.push(Buffer.from(data));
   }
 
+  /** When true, subscribe() never resolves — models a wedged D-Bus call. */
+  public hangSubscribe = false;
+
   async subscribe(onData: (data: Buffer) => void): Promise<void> {
     this.onData = onData;
-  }
-
-  /** Value returned by read(); empty by default (device silent/idle). */
-  public readValue: Buffer = Buffer.alloc(0);
-  public failReads = false;
-
-  async read(): Promise<Buffer> {
-    if (this.failReads) {
-      throw new Error('read not permitted');
+    if (this.hangSubscribe) {
+      await new Promise<void>(() => undefined); // never resolves
     }
-    return this.readValue;
   }
 
   /** Simulates the BedJet pushing a status notification. */
@@ -68,6 +63,8 @@ export class FakeBleProvider implements BleProvider {
     resolve: (conn?: FakeConnection) => void;
     reject: (err: Error) => void;
   }> = [];
+  /** Called with each freshly-created connection so a test can rig its chars. */
+  public connectHook?: (conn: FakeConnection) => void;
 
   async connect(_mac: string): Promise<BleConnection> {
     if (this.failNextConnects > 0) {
@@ -79,6 +76,7 @@ export class FakeBleProvider implements BleProvider {
         this.pendingConnects.push({
           resolve: (conn?: FakeConnection) => {
             const c = conn ?? new FakeConnection();
+            this.connectHook?.(c);
             this.connections.push(c);
             resolve(c);
           },
@@ -87,6 +85,7 @@ export class FakeBleProvider implements BleProvider {
       });
     }
     const conn = new FakeConnection();
+    this.connectHook?.(conn);
     this.connections.push(conn);
     return conn;
   }
