@@ -2,6 +2,29 @@ import { createBluetooth } from 'node-ble';
 import { BleConnection, BleProvider } from './transport';
 
 const WAIT_DEVICE_TIMEOUT_MS = 30_000;
+const SETTLE_TIMEOUT_MS = 20_000;
+const SETTLE_POLL_MS = 500;
+
+/**
+ * Resolves once the device reports connected, or rejects after `ms`.
+ * node-ble types `isConnected()` as returning a string, but it resolves to a
+ * boolean at runtime, so we treat the result as truthy/falsy.
+ */
+async function waitUntilConnected(
+  device: { isConnected(): Promise<unknown> },
+  ms: number,
+): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    if (await device.isConnected()) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error('connection did not settle');
+    }
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+  }
+}
 
 /**
  * Real BleProvider backed by node-ble (BlueZ over D-Bus). Not unit tested —
@@ -22,24 +45,42 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
   return {
     async connect(mac: string): Promise<BleConnection> {
       const adapter = await bluetooth.defaultAdapter();
-      if (!(await adapter.isDiscovering())) {
+
+      // Prefer an already-known device: on a Pi whose single radio is shared
+      // with other BLE plugins, forcing discovery on every reconnect causes
+      // adapter contention. Only scan if BlueZ doesn't already know the device.
+      let device;
+      try {
+        device = await adapter.getDevice(mac);
+      } catch {
+        if (!(await adapter.isDiscovering())) {
+          try {
+            await adapter.startDiscovery();
+          } catch {
+            // Another process (or a previous run) already started discovery.
+          }
+        }
+        device = await adapter.waitDevice(mac, WAIT_DEVICE_TIMEOUT_MS);
         try {
-          await adapter.startDiscovery();
+          await adapter.stopDiscovery();
         } catch {
-          // Another process (or a previous run) already started discovery.
+          // Not discovering (e.g. another process already stopped it).
         }
       }
-      const device = await adapter.waitDevice(mac, WAIT_DEVICE_TIMEOUT_MS);
-      try {
-        // Stop scanning once we've found the device: continuous discovery
-        // shares the Pi's single BLE radio with the connection attempt and
-        // degrades stability. The next reconnect calls connect() again,
-        // which restarts discovery (via the isDiscovering() check above).
-        await adapter.stopDiscovery();
-      } catch {
-        // Not discovering (e.g. another process already stopped it).
+
+      // Reuse an existing BlueZ-level connection instead of fighting it.
+      // Calling Connect() while BlueZ is already connected or mid-connect
+      // throws "In Progress"; if the link is already up we skip straight to
+      // GATT, and if a connect is in flight we wait for it to settle rather
+      // than hammering Connect() and backing off forever.
+      if (!(await device.isConnected())) {
+        try {
+          await device.connect();
+        } catch {
+          // "In Progress"/transient: let BlueZ settle, then verify state.
+          await waitUntilConnected(device, SETTLE_TIMEOUT_MS);
+        }
       }
-      await device.connect();
       const gatt = await device.gatt();
       return {
         async getCharacteristic(serviceUuid, charUuid) {
