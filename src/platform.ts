@@ -15,15 +15,19 @@ interface BedJetDeviceConfig {
 }
 
 /**
- * 0 or unset → watchdog disabled. A positive value opts in and is clamped to a
- * 60s floor so it can't recycle the connection in a tight loop.
+ * Silence watchdog: a healthy BedJet streams status ~every 300ms, so a short
+ * silence means a dead link. Default 15s when unset. Explicit 0 disables it.
+ * Positive values are clamped to a 10s floor.
  */
 function statusTimeoutMsFromConfig(raw: unknown): number {
+  if (raw === 0 || raw === '0') {
+    return 0; // explicitly disabled
+  }
   const seconds = Number(raw);
   if (!Number.isFinite(seconds) || seconds <= 0) {
-    return 0;
+    return 15_000; // default
   }
-  return Math.max(60, seconds) * 1000;
+  return Math.max(10, seconds) * 1000;
 }
 
 export class BedJetPlatform implements DynamicPlatformPlugin {

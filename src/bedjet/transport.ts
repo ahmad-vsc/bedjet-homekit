@@ -35,7 +35,10 @@ export interface TransportOptions {
 }
 
 const INITIAL_BACKOFF_MS = 1000;
-const WATCHDOG_INTERVAL_MS = 15_000;
+// A healthy BedJet connection streams status roughly every ~300ms, so silence
+// of even a few seconds means the link died (the Pi's radio can drop it without
+// BlueZ noticing). Check often and recycle quickly.
+const WATCHDOG_INTERVAL_MS = 5_000;
 const DEFAULT_OP_TIMEOUT_MS = 20_000;
 // A connection that survives this long is considered stable, so its backoff
 // resets. A drop sooner than this is treated as flapping and backs off, so a

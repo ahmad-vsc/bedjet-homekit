@@ -31,9 +31,9 @@
       "statusTimeoutSeconds": {
         "title": "Status silence timeout (seconds)",
         "type": "integer",
-        "default": 0,
+        "default": 15,
         "minimum": 0,
-        "description": "0 = off (recommended). If set above 0 (min 60), recycle the BLE connection when no status arrives for this long. Leave off: a BedJet that is simply powered off sends no status, so this would needlessly reconnect."
+        "description": "Recycle the BLE connection if no status arrives for this long. A healthy BedJet streams status several times per second, so 15s reliably detects a dead link. 0 disables the check (not recommended)."
       },
       "maxReconnectBackoffSeconds": {
         "title": "Max reconnect backoff (seconds)",
