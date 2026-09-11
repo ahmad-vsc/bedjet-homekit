@@ -2,27 +2,67 @@ import { createBluetooth } from 'node-ble';
 import { BleConnection, BleProvider } from './transport';
 
 const WAIT_DEVICE_TIMEOUT_MS = 30_000;
-const SETTLE_TIMEOUT_MS = 20_000;
-const SETTLE_POLL_MS = 500;
+const DISCONNECT_TIMEOUT_MS = 8_000;
+const SETTLE_POLL_MS = 400;
+const RETRY_PAUSE_MS = 1_500;
 
-/**
- * Resolves once the device reports connected, or rejects after `ms`.
- * node-ble types `isConnected()` as returning a string, but it resolves to a
- * boolean at runtime, so we treat the result as truthy/falsy.
- */
-async function waitUntilConnected(
-  device: { isConnected(): Promise<unknown> },
-  ms: number,
-): Promise<void> {
+// node-ble types isConnected() as string, but it resolves to a boolean at
+// runtime, so results are treated as truthy/falsy throughout.
+type ConnDevice = {
+  isConnected(): Promise<unknown>;
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+function withTimeout<T>(op: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    op,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(label + ' timed out')), ms)),
+  ]);
+}
+
+/** Polls until the device reports disconnected, or gives up after `ms`. */
+async function waitUntilDisconnected(device: ConnDevice, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
-    if (await device.isConnected()) {
-      return;
+    if (!(await device.isConnected())) {
+      return true;
     }
     if (Date.now() >= deadline) {
-      throw new Error('connection did not settle');
+      return false;
     }
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+    await sleep(SETTLE_POLL_MS);
+  }
+}
+
+/**
+ * Establishes a connection this client OWNS. A connection BlueZ set up on its
+ * own (auto-connect of a trusted device) resolves GATT but rejects our writes
+ * with "Not connected", so any pre-existing connection is torn down first.
+ * One retry absorbs the transient BlueZ aborts ("le-connection-abort-by-local",
+ * "In Progress") common on the Pi's built-in radio.
+ */
+async function connectOwned(device: ConnDevice): Promise<void> {
+  if (await device.isConnected()) {
+    try {
+      await withTimeout(device.disconnect(), DISCONNECT_TIMEOUT_MS, 'disconnect');
+    } catch {
+      // Hung/stale disconnect — fall through and try to connect anyway.
+    }
+    await waitUntilDisconnected(device, DISCONNECT_TIMEOUT_MS);
+  }
+  try {
+    await device.connect();
+  } catch {
+    try {
+      await device.disconnect();
+    } catch {
+      // ignore
+    }
+    await sleep(RETRY_PAUSE_MS);
+    await device.connect(); // let a second failure propagate to the transport
   }
 }
 
@@ -68,19 +108,10 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
         }
       }
 
-      // Reuse an existing BlueZ-level connection instead of fighting it.
-      // Calling Connect() while BlueZ is already connected or mid-connect
-      // throws "In Progress"; if the link is already up we skip straight to
-      // GATT, and if a connect is in flight we wait for it to settle rather
-      // than hammering Connect() and backing off forever.
-      if (!(await device.isConnected())) {
-        try {
-          await device.connect();
-        } catch {
-          // "In Progress"/transient: let BlueZ settle, then verify state.
-          await waitUntilConnected(device, SETTLE_TIMEOUT_MS);
-        }
-      }
+      // Own the connection: a BlueZ auto-connection (trusted device) resolves
+      // GATT but rejects our writes with "Not connected", so tear down any
+      // pre-existing link and connect fresh ourselves.
+      await connectOwned(device as unknown as ConnDevice);
       const gatt = await device.gatt();
       return {
         async getCharacteristic(serviceUuid, charUuid) {

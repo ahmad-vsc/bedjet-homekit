@@ -1,6 +1,6 @@
 {
   "name": "homebridge-bedjet-v3",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Homebridge plugin for BedJet V3 over Bluetooth LE (no cloud)",
   "license": "MIT",
   "main": "dist/index.js",
