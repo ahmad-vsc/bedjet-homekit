@@ -15,7 +15,10 @@ export interface BedJetSnapshot extends BedJetStatus {
 export interface TransportLike {
   readonly state: TransportState;
   write(data: Buffer, coalesceKey?: string): Promise<void>;
-  on(event: string, cb: (arg: never) => void): unknown;
+  // `(...args: any[]) => void` mirrors @types/node's own EventEmitter.on
+  // listener type, so a real EventEmitter (e.g. BedJetTransport) satisfies
+  // this structurally without a cast.
+  on(event: string, cb: (...args: any[]) => void): unknown;
 }
 
 const DEFAULT_MIN_TEMP_C = 19;
