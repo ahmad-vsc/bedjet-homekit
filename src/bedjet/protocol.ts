@@ -57,3 +57,54 @@ export function buildSetFanPacket(step: number): Buffer {
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
+
+const PACKET_FORMAT_V3_HOME = 0x56;
+const PACKET_TYPE_STATUS = 0x01;
+
+export interface BedJetStatus {
+  mode: BedJetMode;
+  /** Outlet air temperature — what the BedJet is blowing right now. */
+  currentTempC: number;
+  targetTempC: number;
+  ambientTempC: number;
+  fanStep: number; // 0..19
+  minTempC: number;
+  maxTempC: number;
+  secondsRemaining: number;
+}
+
+/**
+ * Parses a V3 status notification (first fragment). Returns null for
+ * debug packets, short packets, or values outside the sanity window
+ * (mirrors ESPHome's BedjetCodec::decode_notify validation).
+ */
+export function parseStatus(data: Buffer): BedJetStatus | null {
+  if (data.length < 19) {
+    return null;
+  }
+  if (data[1] !== PACKET_FORMAT_V3_HOME || data[3] !== PACKET_TYPE_STATUS) {
+    return null;
+  }
+  const mode = data[9];
+  const actual = data[7];
+  const target = data[8];
+  const ambient = data[17];
+  const plausible =
+    mode < 7 &&
+    target >= 38 && target <= 86 &&
+    actual > 1 && actual <= 100 &&
+    ambient > 1 && ambient <= 100;
+  if (!plausible) {
+    return null;
+  }
+  return {
+    mode: mode as BedJetMode,
+    currentTempC: tempStepToCelsius(actual),
+    targetTempC: tempStepToCelsius(target),
+    ambientTempC: tempStepToCelsius(ambient),
+    fanStep: data[10],
+    minTempC: tempStepToCelsius(data[13]),
+    maxTempC: tempStepToCelsius(data[14]),
+    secondsRemaining: data[4] * 3600 + data[5] * 60 + data[6],
+  };
+}
