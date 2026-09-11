@@ -90,6 +90,31 @@ export class BedJetTransport extends EventEmitter {
     this.setState('DISCONNECTED');
   }
 
+  /**
+   * Sends a command packet. Queued behind any in-flight operation and
+   * coalesced by key. On write failure: one forced reconnect + retry,
+   * then an honest rejection for HomeKit to surface.
+   */
+  write(data: Buffer, coalesceKey?: string): Promise<void> {
+    return this.queue.enqueue(async () => {
+      if (this.stateValue !== 'READY' || !this.commandChar) {
+        throw new Error('BedJet is not connected');
+      }
+      try {
+        await this.commandChar.write(data);
+      } catch (err) {
+        this.log(`write failed (${(err as Error).message}); reconnecting to retry`);
+        // Already inside the queue slot, so call recycleNow directly —
+        // enqueueing here would deadlock behind ourselves.
+        await this.recycleNow();
+        if (this.stateValue !== 'READY' || !this.commandChar) {
+          throw new Error('BedJet is not connected');
+        }
+        await this.commandChar.write(data);
+      }
+    }, coalesceKey);
+  }
+
   /** Serialized via the queue so it never overlaps an in-flight write. */
   private enqueueRecycle(): void {
     void this.queue.enqueue(() => this.recycleNow(), 'recycle').catch(() => undefined);

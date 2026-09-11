@@ -219,3 +219,97 @@ describe('BedJetTransport connection lifecycle', () => {
     expect(t.state).toBe('DISCONNECTED');
   });
 });
+
+describe('BedJetTransport write path', () => {
+  it('writes to the command characteristic when READY', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    await t.write(Buffer.from([0x01, 0x03]));
+    expect([...ble.current.commandChar.writes[0]]).toEqual([0x01, 0x03]);
+    await t.stop();
+  });
+
+  it('rejects fast when disconnected', async () => {
+    const ble = new FakeBleProvider();
+    ble.failNextConnects = 99;
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    await expect(t.write(Buffer.from([0x01, 0x01]))).rejects.toThrow('not connected');
+    await t.stop();
+  });
+
+  it('recovers from a write failure by reconnecting and retrying once', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    ble.current.commandChar.failNextWrites = 1; // simulates ATT error 0x0e
+    await t.write(Buffer.from([0x03, 66]));
+    expect(ble.connections).toHaveLength(2); // recycled
+    expect([...ble.connections[1].commandChar.writes[0]]).toEqual([0x03, 66]);
+    await t.stop();
+  });
+
+  it('rejects when the retry also cannot go through', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    ble.current.commandChar.failNextWrites = 1;
+    ble.failNextConnects = 99; // reconnect will fail too
+    await expect(t.write(Buffer.from([0x03, 66]))).rejects.toThrow('not connected');
+    await t.stop();
+  });
+
+  it('coalesces queued writes with the same key', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    // Three temp writes fired in the same tick (slider drag): the first
+    // enters the queue slot; the next two coalesce down to the last one.
+    const writes = Promise.all([
+      t.write(Buffer.from([0x03, 60]), 'temp'),
+      t.write(Buffer.from([0x03, 62]), 'temp'),
+      t.write(Buffer.from([0x03, 66]), 'temp'),
+    ]);
+    await flush();
+    await writes;
+    const sent = ble.current.commandChar.writes.map((w) => [...w]);
+    expect(sent).toEqual([[0x03, 60], [0x03, 66]]); // middle write never sent
+    await t.stop();
+  });
+});
+
+describe('BedJetTransport status watchdog', () => {
+  it('recycles the connection after status silence', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    expect(ble.connections).toHaveLength(1);
+    // Watchdog ticks every 15s; first check past the 300s threshold is at 315s.
+    await vi.advanceTimersByTimeAsync(320_000);
+    await flush();
+    expect(ble.connections).toHaveLength(2);
+    expect(t.state).toBe('READY');
+    await t.stop();
+  });
+
+  it('does not recycle while notifications keep arriving', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(150_000);
+      await flush();
+      ble.connections[0].statusChar.notify(makeStatusPacket());
+    }
+    expect(ble.connections).toHaveLength(1); // 600s elapsed, never silent >300s
+    await t.stop();
+  });
+});
