@@ -41,17 +41,29 @@ export class BedJetPlatform implements DynamicPlatformPlugin {
   }
 
   private startDevices(): void {
-    const devices = (this.config.devices ?? []) as BedJetDeviceConfig[];
+    const rawDevices = this.config.devices;
+    if (rawDevices !== undefined && !Array.isArray(rawDevices)) {
+      this.log.error('Ignoring "devices" in config: expected an array.');
+    }
+    const devices = (Array.isArray(rawDevices) ? rawDevices : []) as BedJetDeviceConfig[];
     const valid: BedJetDeviceConfig[] = [];
+    const seen = new Set<string>();
     for (const device of devices) {
-      if (typeof device.mac === 'string' && MAC_RE.test(device.mac)) {
-        valid.push({ name: device.name || 'BedJet', mac: device.mac.toUpperCase() });
-      } else {
+      const label = device.name || device.mac || '(unnamed)';
+      if (typeof device.mac !== 'string' || !MAC_RE.test(device.mac)) {
         this.log.error(
-          `Ignoring device "${device.name}": "${device.mac}" is not a MAC address. ` +
+          `Ignoring device "${label}": "${device.mac}" is not a MAC address. ` +
           'Find yours with: npx homebridge-bedjet-v3 scan',
         );
+        continue;
       }
+      const mac = device.mac.toUpperCase();
+      if (seen.has(mac)) {
+        this.log.error(`Ignoring duplicate device entry for ${mac}`);
+        continue;
+      }
+      seen.add(mac);
+      valid.push({ name: device.name || 'BedJet', mac });
     }
 
     for (const device of valid) {
