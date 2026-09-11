@@ -105,8 +105,10 @@ Any failure returns to `DISCONNECTED` and schedules reconnect with exponential b
 1. BlueZ reports disconnection;
 2. a write fails with an ATT/DBus error — one forced reconnect + retry, then the
    HomeKit request fails honestly (fixes silent ATT `0x0e` black holes);
-3. **status silence**: no notification for ~90 s → connection presumed stale and
-   recycled proactively (ESPHome uses the same liveness signal).
+3. **status silence**: no notification for 300 s (default) → connection presumed
+   stale and recycled proactively. ESPHome uses the same liveness signal; the
+   BedJet notifies rarely while off, so shorter timeouts would recycle healthy
+   connections.
 
 **Honest failure reporting** — commands while disconnected fail fast; HomeKit shows
 the accessory as unresponsive rather than pretending success. On reconnect, status is
@@ -125,7 +127,7 @@ a human-readable hint: "is the BedJet phone app open?"
 ```
 
 - Ships `config.schema.json` for the Homebridge Config UI form.
-- Optional advanced settings (defaulted): `statusTimeoutSeconds` (90),
+- Optional advanced settings (defaulted): `statusTimeoutSeconds` (300),
   `maxReconnectBackoffSeconds` (60).
 - Helper: `npx homebridge-bedjet-v3 scan` lists nearby BedJets and their MACs.
 
