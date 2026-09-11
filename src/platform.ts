@@ -14,6 +14,18 @@ interface BedJetDeviceConfig {
   mac: string;
 }
 
+/**
+ * 0 or unset → watchdog disabled. A positive value opts in and is clamped to a
+ * 60s floor so it can't recycle the connection in a tight loop.
+ */
+function statusTimeoutMsFromConfig(raw: unknown): number {
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return 0;
+  }
+  return Math.max(60, seconds) * 1000;
+}
+
 export class BedJetPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
   public readonly Characteristic: typeof Characteristic;
@@ -82,9 +94,11 @@ export class BedJetPlatform implements DynamicPlatformPlugin {
 
       const provider = createNodeBleProvider();
       const transport = new BedJetTransport(provider, device.mac, {
-        // Clamp to the schema minimums: a hand-edited config below these
-        // would make the watchdog recycle the connection in a tight loop.
-        statusTimeoutMs: Math.max(60, Number(this.config.statusTimeoutSeconds) || 300) * 1000,
+        // Silence watchdog is OFF by default (0): a BedJet that's simply off
+        // sends no status, so recycling on silence would needlessly churn the
+        // radio. Real drops and failed commands still trigger reconnects. Set
+        // statusTimeoutSeconds > 0 to opt back in (clamped to a 60s minimum).
+        statusTimeoutMs: statusTimeoutMsFromConfig(this.config.statusTimeoutSeconds),
         maxBackoffMs: Math.max(5, Number(this.config.maxReconnectBackoffSeconds) || 60) * 1000,
         log: (msg) => this.log.info(`[${device.name}] ${msg}`),
       });

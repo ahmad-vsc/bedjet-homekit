@@ -31,6 +31,11 @@ export interface TransportOptions {
 const INITIAL_BACKOFF_MS = 1000;
 const WATCHDOG_INTERVAL_MS = 15_000;
 const DEFAULT_OP_TIMEOUT_MS = 20_000;
+// A connection that survives this long is considered stable, so its backoff
+// resets. A drop sooner than this is treated as flapping and backs off, so a
+// contended/flaky radio (e.g. the Pi's built-in BLE shared with other plugins)
+// is never hammered with immediate reconnects.
+const MIN_STABLE_MS = 12_000;
 
 /**
  * Owns the single BLE connection to a BedJet. All GATT operations are
@@ -46,6 +51,7 @@ export class BedJetTransport extends EventEmitter {
   private backoffMs = INITIAL_BACKOFF_MS;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdog: ReturnType<typeof setInterval> | null = null;
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private lastStatusAt = 0;
   private stopped = true;
 
@@ -75,7 +81,13 @@ export class BedJetTransport extends EventEmitter {
   start(): void {
     this.stopped = false;
     this.enqueueRecycle();
-    this.watchdog = setInterval(() => this.checkLiveness(), WATCHDOG_INTERVAL_MS);
+    // The silence watchdog is opt-in: recycling a healthy but quiet connection
+    // (a BedJet that's simply off sends no status) churns the radio for no
+    // reason. Real drops are caught by the disconnect handler, and a failed
+    // command reconnects on its own. Enable only if statusTimeoutMs > 0.
+    if (this.statusTimeoutMs > 0) {
+      this.watchdog = setInterval(() => this.checkLiveness(), WATCHDOG_INTERVAL_MS);
+    }
   }
 
   async stop(): Promise<void> {
@@ -87,6 +99,10 @@ export class BedJetTransport extends EventEmitter {
     if (this.watchdog) {
       clearInterval(this.watchdog);
       this.watchdog = null;
+    }
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
     }
     // Serialize with any in-flight/pending recycleNow() so we never tear down
     // out from under a connect that's still resolving; also coalesces away
@@ -159,7 +175,6 @@ export class BedJetTransport extends EventEmitter {
       // No initial read: the BedJet's status characteristic is notify-only, and
       // the client already presents a reachable Off state until the first
       // notification arrives (which the device sends once it's turned on).
-      this.backoffMs = INITIAL_BACKOFF_MS;
       this.lastStatusAt = Date.now();
       // A stray timer can still be pending here if this success came from a
       // recycle that superseded an earlier failed attempt (e.g. a direct
@@ -169,6 +184,18 @@ export class BedJetTransport extends EventEmitter {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
+      // Reset backoff only after the connection proves stable — not
+      // immediately — so a link that drops within seconds keeps backing off
+      // instead of reconnecting on a tight loop.
+      if (this.stableTimer) {
+        clearTimeout(this.stableTimer);
+      }
+      this.stableTimer = setTimeout(() => {
+        this.stableTimer = null;
+        if (this.stateValue === 'READY') {
+          this.backoffMs = INITIAL_BACKOFF_MS;
+        }
+      }, MIN_STABLE_MS);
       this.setState('READY');
       this.log('connected to BedJet');
     } catch (err) {
@@ -251,11 +278,27 @@ export class BedJetTransport extends EventEmitter {
     if (this.stopped || connection !== this.connection) {
       return;
     }
-    this.log('BedJet disconnected; reconnecting');
     this.connection = null;
     this.commandChar = null;
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
     this.setState('DISCONNECTED');
-    this.enqueueRecycle();
+    // Reconnect through the backoff timer, never instantly: a link that keeps
+    // dropping (radio contention / weak signal) would otherwise flap the radio
+    // and make things worse. Backoff was reset to 1s once the last connection
+    // proved stable, so a healthy one-off drop still reconnects within ~1s.
+    const delay = this.backoffMs;
+    this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
+    this.log(`BedJet disconnected; reconnecting in ${Math.round(delay / 1000)}s`);
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.enqueueRecycle();
+    }, delay);
   }
 
   private onStatus(data: Buffer): void {
