@@ -1,9 +1,102 @@
-// src/platform.ts — stub; replaced with the real platform in the next task.
-import type { API, Characteristic, Logger, Service } from 'homebridge';
+import {
+  API, Characteristic, DynamicPlatformPlugin, Logger, PlatformAccessory, PlatformConfig, Service,
+} from 'homebridge';
+import { BedJetAccessory } from './accessory';
+import { BedJetClient, TransportLike } from './bedjet/client';
+import { createNodeBleProvider } from './bedjet/nodeBleProvider';
+import { BedJetTransport } from './bedjet/transport';
+import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 
-export interface BedJetPlatform {
-  readonly Service: typeof Service;
-  readonly Characteristic: typeof Characteristic;
-  readonly log: Logger;
-  readonly api: API;
+const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+
+interface BedJetDeviceConfig {
+  name: string;
+  mac: string;
+}
+
+export class BedJetPlatform implements DynamicPlatformPlugin {
+  public readonly Service: typeof Service;
+  public readonly Characteristic: typeof Characteristic;
+
+  private readonly cachedAccessories: PlatformAccessory[] = [];
+  private readonly cleanups: Array<() => Promise<void> | void> = [];
+
+  constructor(
+    public readonly log: Logger,
+    public readonly config: PlatformConfig,
+    public readonly api: API,
+  ) {
+    this.Service = api.hap.Service;
+    this.Characteristic = api.hap.Characteristic;
+    api.on('didFinishLaunching', () => this.startDevices());
+    api.on('shutdown', () => {
+      for (const cleanup of this.cleanups) {
+        void cleanup();
+      }
+    });
+  }
+
+  configureAccessory(accessory: PlatformAccessory): void {
+    this.cachedAccessories.push(accessory);
+  }
+
+  private startDevices(): void {
+    const devices = (this.config.devices ?? []) as BedJetDeviceConfig[];
+    const valid: BedJetDeviceConfig[] = [];
+    for (const device of devices) {
+      if (typeof device.mac === 'string' && MAC_RE.test(device.mac)) {
+        valid.push({ name: device.name || 'BedJet', mac: device.mac.toUpperCase() });
+      } else {
+        this.log.error(
+          `Ignoring device "${device.name}": "${device.mac}" is not a MAC address. ` +
+          'Find yours with: npx homebridge-bedjet-v3 scan',
+        );
+      }
+    }
+
+    for (const device of valid) {
+      const uuid = this.api.hap.uuid.generate(device.mac);
+      let accessory = this.cachedAccessories.find((a) => a.UUID === uuid);
+      if (!accessory) {
+        this.log.info(`Adding new accessory: ${device.name} (${device.mac})`);
+        accessory = new this.api.platformAccessory(device.name, uuid);
+        this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+      }
+      accessory.context.mac = device.mac;
+
+      const provider = createNodeBleProvider();
+      const transport = new BedJetTransport(provider, device.mac, {
+        statusTimeoutMs: ((this.config.statusTimeoutSeconds as number) ?? 300) * 1000,
+        maxBackoffMs: ((this.config.maxReconnectBackoffSeconds as number) ?? 60) * 1000,
+        log: (msg) => this.log.info(`[${device.name}] ${msg}`),
+      });
+      // TypeScript's strictFunctionTypes rejects this assignment structurally:
+      // TransportLike.on()'s callback parameter is typed `never` (deliberately
+      // permissive at the call site — it's never invoked with an argument by
+      // callers), but @types/node's generic EventEmitter.on() types its
+      // listener as `(...args: any[]) => void`, and nested callback-parameter
+      // variance is checked strictly even where the outer method itself gets
+      // bivariant treatment. TS won't even allow a direct `as TransportLike`
+      // cast here (it requires routing through `unknown` first) because the
+      // generic `on<K>(...)` overload it picks up isn't "comparable" by its
+      // own heuristic. BedJetTransport is otherwise fully behaviorally
+      // compatible with TransportLike (verified by tests/client.test.ts and
+      // tests/transport.test.ts: same `state` getter, `write()`, and `on()`
+      // usage for 'status'/'state' events), so this cast is safe.
+      const client = new BedJetClient(transport as unknown as TransportLike);
+      new BedJetAccessory(this, accessory, client);
+      transport.start();
+      this.cleanups.push(async () => {
+        await transport.stop();
+        provider.destroy();
+      });
+    }
+
+    const activeUuids = new Set(valid.map((d) => this.api.hap.uuid.generate(d.mac)));
+    const stale = this.cachedAccessories.filter((a) => !activeUuids.has(a.UUID));
+    if (stale.length > 0) {
+      this.log.info(`Removing ${stale.length} accessory(ies) no longer in config`);
+      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
+    }
+  }
 }

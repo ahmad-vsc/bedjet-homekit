@@ -1,0 +1,46 @@
+{
+  "pluginAlias": "BedJetV3",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string", "default": "BedJetV3" },
+      "devices": {
+        "title": "BedJets",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string",
+              "default": "BedJet",
+              "required": true
+            },
+            "mac": {
+              "title": "Bluetooth MAC address",
+              "type": "string",
+              "required": true,
+              "pattern": "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
+              "description": "Find it by running: npx homebridge-bedjet-v3 scan"
+            }
+          }
+        }
+      },
+      "statusTimeoutSeconds": {
+        "title": "Status silence timeout (seconds)",
+        "type": "integer",
+        "default": 300,
+        "minimum": 60,
+        "description": "Recycle the BLE connection if no status arrives for this long."
+      },
+      "maxReconnectBackoffSeconds": {
+        "title": "Max reconnect backoff (seconds)",
+        "type": "integer",
+        "default": 60,
+        "minimum": 5
+      }
+    }
+  }
+}
