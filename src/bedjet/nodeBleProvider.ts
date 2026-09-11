@@ -5,6 +5,13 @@ const WAIT_DEVICE_TIMEOUT_MS = 30_000;
 const DISCONNECT_TIMEOUT_MS = 8_000;
 const SETTLE_POLL_MS = 400;
 const RETRY_PAUSE_MS = 1_500;
+// node-ble reuses one Device object per MAC and broadcasts its 'disconnect'
+// event to every listener. A disconnect we trigger ourselves (teardown or the
+// reconnect below) is delivered asynchronously — often a second or two later,
+// after we've already reconnected — and must NOT be mistaken for the device
+// dropping, or reconnect loops forever. Events within this window of a
+// deliberate disconnect are treated as our own and ignored.
+const DELIBERATE_DISCONNECT_GRACE_MS = 4_000;
 
 // node-ble types isConnected() as string, but it resolves to a boolean at
 // runtime, so results are treated as truthy/falsy throughout.
@@ -44,8 +51,9 @@ async function waitUntilDisconnected(device: ConnDevice, ms: number): Promise<bo
  * One retry absorbs the transient BlueZ aborts ("le-connection-abort-by-local",
  * "In Progress") common on the Pi's built-in radio.
  */
-async function connectOwned(device: ConnDevice): Promise<void> {
+async function connectOwned(device: ConnDevice, markDeliberate: () => void): Promise<void> {
   if (await device.isConnected()) {
+    markDeliberate();
     try {
       await withTimeout(device.disconnect(), DISCONNECT_TIMEOUT_MS, 'disconnect');
     } catch {
@@ -56,6 +64,7 @@ async function connectOwned(device: ConnDevice): Promise<void> {
   try {
     await device.connect();
   } catch {
+    markDeliberate();
     try {
       await device.disconnect();
     } catch {
@@ -82,6 +91,12 @@ async function connectOwned(device: ConnDevice): Promise<void> {
  */
 export function createNodeBleProvider(): BleProvider & { destroy(): void } {
   const { bluetooth, destroy } = createBluetooth();
+  // Timestamp of the last disconnect WE initiated (teardown or reconnect).
+  // Shared across connect() calls because node-ble reuses one Device per MAC.
+  let deliberateDisconnectAt = 0;
+  const markDeliberate = (): void => {
+    deliberateDisconnectAt = Date.now();
+  };
   return {
     async connect(mac: string): Promise<BleConnection> {
       const adapter = await bluetooth.defaultAdapter();
@@ -111,7 +126,7 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
       // Own the connection: a BlueZ auto-connection (trusted device) resolves
       // GATT but rejects our writes with "Not connected", so tear down any
       // pre-existing link and connect fresh ourselves.
-      await connectOwned(device as unknown as ConnDevice);
+      await connectOwned(device as unknown as ConnDevice, markDeliberate);
       const gatt = await device.gatt();
       return {
         async getCharacteristic(serviceUuid, charUuid) {
@@ -124,12 +139,16 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
             // "Not connected" error, so use 'command' (no response).
             write: (data) => characteristic.writeValue(data, { offset: 0, type: 'command' }),
             subscribe: async (onData) => {
+              // Drop any listener left over from a previous connection — the
+              // char object is reused per path, so they would otherwise pile up.
+              characteristic.removeAllListeners('valuechanged');
               characteristic.on('valuechanged', onData);
               await characteristic.startNotifications();
             },
           };
         },
         async disconnect() {
+          markDeliberate();
           try {
             await device.disconnect();
           } catch {
@@ -137,7 +156,15 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
           }
         },
         onDisconnect(cb) {
-          device.on('disconnect', cb);
+          // Single listener on the shared Device; ignore self-inflicted
+          // disconnects (delivered late) so reconnects don't loop.
+          device.removeAllListeners('disconnect');
+          device.on('disconnect', () => {
+            if (Date.now() - deliberateDisconnectAt < DELIBERATE_DISCONNECT_GRACE_MS) {
+              return;
+            }
+            cb();
+          });
         },
       };
     },
