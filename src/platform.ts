@@ -3,7 +3,7 @@ import {
 } from 'homebridge';
 import { BedJetAccessory } from './accessory';
 import { BedJetClient } from './bedjet/client';
-import { createNodeBleProvider } from './bedjet/nodeBleProvider';
+import { createNodeBleProvider, resetBluetoothAdapter } from './bedjet/nodeBleProvider';
 import { BedJetTransport } from './bedjet/transport';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
 
@@ -100,6 +100,7 @@ export class BedJetPlatform implements DynamicPlatformPlugin {
         // statusTimeoutSeconds > 0 to opt back in (clamped to a 60s minimum).
         statusTimeoutMs: statusTimeoutMsFromConfig(this.config.statusTimeoutSeconds),
         maxBackoffMs: Math.max(5, Number(this.config.maxReconnectBackoffSeconds) || 60) * 1000,
+        resetAdapter: resetBluetoothAdapter,
         log: (msg) => this.log.info(`[${device.name}] ${msg}`),
       });
       const client = new BedJetClient(transport);

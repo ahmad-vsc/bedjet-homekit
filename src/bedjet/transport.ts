@@ -25,6 +25,12 @@ export interface TransportOptions {
   connectTimeoutMs?: number;
   /** Ceiling for any single post-connect GATT op (subscribe, write, disconnect). */
   opTimeoutMs?: number;
+  /**
+   * Optional recovery hook: power-cycle the BLE adapter. Called after several
+   * consecutive connect failures to clear a wedged controller (the Pi's
+   * built-in radio can get stuck under contention). Omit to disable.
+   */
+  resetAdapter?: () => Promise<void>;
   log?: (msg: string) => void;
 }
 
@@ -36,6 +42,9 @@ const DEFAULT_OP_TIMEOUT_MS = 20_000;
 // contended/flaky radio (e.g. the Pi's built-in BLE shared with other plugins)
 // is never hammered with immediate reconnects.
 const MIN_STABLE_MS = 12_000;
+// After this many consecutive connect failures, power-cycle the adapter (if a
+// resetAdapter hook was provided) to clear a wedged controller.
+const RESET_AFTER_FAILURES = 3;
 
 /**
  * Owns the single BLE connection to a BedJet. All GATT operations are
@@ -53,12 +62,14 @@ export class BedJetTransport extends EventEmitter {
   private watchdog: ReturnType<typeof setInterval> | null = null;
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private lastStatusAt = 0;
+  private consecutiveFailures = 0;
   private stopped = true;
 
   private readonly statusTimeoutMs: number;
   private readonly maxBackoffMs: number;
   private readonly connectTimeoutMs: number;
   private readonly opTimeoutMs: number;
+  private readonly resetAdapter?: () => Promise<void>;
   private readonly log: (msg: string) => void;
 
   constructor(
@@ -71,6 +82,7 @@ export class BedJetTransport extends EventEmitter {
     this.maxBackoffMs = opts.maxBackoffMs ?? 60_000;
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 45_000;
     this.opTimeoutMs = opts.opTimeoutMs ?? DEFAULT_OP_TIMEOUT_MS;
+    this.resetAdapter = opts.resetAdapter;
     this.log = opts.log ?? (() => undefined);
   }
 
@@ -196,6 +208,7 @@ export class BedJetTransport extends EventEmitter {
           this.backoffMs = INITIAL_BACKOFF_MS;
         }
       }, MIN_STABLE_MS);
+      this.consecutiveFailures = 0;
       this.setState('READY');
       this.log('connected to BedJet');
     } catch (err) {
@@ -204,12 +217,26 @@ export class BedJetTransport extends EventEmitter {
       if (this.stopped) {
         return;
       }
+      this.consecutiveFailures++;
+      this.log(
+        `connect failed (${(err as Error).message}) — is the BedJet app open on your phone?`,
+      );
+      // Repeated failures usually mean the adapter is wedged (the Pi's built-in
+      // radio does this under contention). Power-cycle it to recover.
+      if (this.resetAdapter && this.consecutiveFailures % RESET_AFTER_FAILURES === 0) {
+        this.log(`still failing after ${this.consecutiveFailures} tries; resetting the Bluetooth adapter`);
+        try {
+          await this.resetAdapter();
+        } catch (resetErr) {
+          this.log(`adapter reset failed: ${(resetErr as Error).message}`);
+        }
+        if (this.stopped) {
+          return;
+        }
+      }
       const delay = this.backoffMs;
       this.backoffMs = Math.min(this.backoffMs * 2, this.maxBackoffMs);
-      this.log(
-        `connect failed (${(err as Error).message}) — is the BedJet app open on your phone? ` +
-        `Retrying in ${Math.round(delay / 1000)}s`,
-      );
+      this.log(`retrying in ${Math.round(delay / 1000)}s`);
       this.reconnectTimer = setTimeout(() => {
         this.reconnectTimer = null;
         this.enqueueRecycle();

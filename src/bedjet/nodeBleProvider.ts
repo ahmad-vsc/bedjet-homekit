@@ -1,5 +1,21 @@
+import { execFile } from 'child_process';
 import { createBluetooth } from 'node-ble';
 import { BleConnection, BleProvider } from './transport';
+
+/**
+ * Power-cycles the default BLE controller via bluetoothctl (which talks to
+ * BlueZ over D-Bus — permitted for the Homebridge user by the plugin's D-Bus
+ * policy, no root needed). Used to recover a wedged built-in radio.
+ */
+export function resetBluetoothAdapter(): Promise<void> {
+  const run = (args: string[]): Promise<void> =>
+    new Promise((resolve) => execFile('bluetoothctl', args, { timeout: 8_000 }, () => resolve()));
+  const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  return run(['power', 'off'])
+    .then(() => wait(2_000))
+    .then(() => run(['power', 'on']))
+    .then(() => wait(2_500));
+}
 
 const WAIT_DEVICE_TIMEOUT_MS = 30_000;
 const DISCONNECT_TIMEOUT_MS = 8_000;

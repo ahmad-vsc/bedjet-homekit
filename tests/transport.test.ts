@@ -100,7 +100,7 @@ describe('BedJetTransport connection lifecycle', () => {
     await t.stop();
   });
 
-  it('reconnects immediately after an unsolicited disconnect', async () => {
+  it('reconnects after an unsolicited disconnect via the backoff timer', async () => {
     const ble = new FakeBleProvider();
     const t = makeTransport(ble);
     t.start();
@@ -108,6 +108,10 @@ describe('BedJetTransport connection lifecycle', () => {
     expect(t.state).toBe('READY');
 
     ble.current.dropConnection();
+    await flush();
+    expect(t.state).toBe('DISCONNECTED'); // reconnect is scheduled, not instant
+
+    await vi.advanceTimersByTimeAsync(1000); // first backoff delay
     await flush();
     expect(t.state).toBe('READY');
     expect(ble.connections).toHaveLength(2); // new connection established
@@ -156,8 +160,7 @@ describe('BedJetTransport connection lifecycle', () => {
     expect(t.state).toBe('READY');
     expect(ble.connections).toHaveLength(1);
 
-    // A reconnect attempt fails and schedules a 1s backoff retry timer.
-    ble.failNextConnects = 1;
+    // An unsolicited drop schedules a 1s backoff reconnect timer.
     ble.current.dropConnection();
     await flush();
     expect(t.state).toBe('DISCONNECTED');
@@ -173,7 +176,7 @@ describe('BedJetTransport connection lifecycle', () => {
 
     // Advance past the ORIGINAL (now-stale) backoff delay. Without the fix,
     // the stray timer fires and needlessly recycles the healthy connection.
-    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(2000);
     await flush();
     expect(ble.connections).toHaveLength(2); // no extra reconnect
     expect(t.state).toBe('READY');
@@ -190,8 +193,37 @@ describe('BedJetTransport connection lifecycle', () => {
     ble.connections[0].dropConnection();
     ble.connections[0].dropConnection(); // stale second event for the same connection
     await flush();
+    await vi.advanceTimersByTimeAsync(1000); // single scheduled reconnect
+    await flush();
 
     expect(ble.connections).toHaveLength(2); // exactly one reconnect
+    expect(t.state).toBe('READY');
+    await t.stop();
+  });
+
+  it('power-cycles the adapter after repeated connect failures, then recovers', async () => {
+    const ble = new FakeBleProvider();
+    ble.failNextConnects = 3; // fail the first three attempts
+    let resets = 0;
+    const t = new BedJetTransport(ble, 'AA:BB:CC:DD:EE:FF', {
+      statusTimeoutMs: 0,
+      maxBackoffMs: 60_000,
+      resetAdapter: async () => { resets += 1; },
+    });
+    t.start();
+    await flush(); // attempt 1 fails
+    expect(resets).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1000); // attempt 2 fails
+    await flush();
+    expect(resets).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(2000); // attempt 3 fails → 3rd failure triggers reset
+    await flush();
+    expect(resets).toBe(1); // adapter was power-cycled
+
+    await vi.advanceTimersByTimeAsync(4000); // attempt 4 succeeds (failNextConnects exhausted)
+    await flush();
     expect(t.state).toBe('READY');
     await t.stop();
   });
