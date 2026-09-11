@@ -23,6 +23,10 @@ export class OperationQueue {
           this.pending.splice(i, 1)[0].resolve();
         }
       }
+      // Re-queue the replacement at the TAIL (not back in its old slot): this
+      // preserves true request chronology, which is what keeps mode-before-fan
+      // ordering intact for a combined Home-app gesture (e.g. switching to
+      // Heat and bumping the fan speed in the same drag).
       this.pending.push({ run, coalesceKey, resolve, reject });
       void this.drain();
     });

@@ -5,6 +5,7 @@
   "license": "MIT",
   "main": "dist/index.js",
   "bin": { "homebridge-bedjet-v3": "dist/cli.js" },
+  "files": ["dist", "config.schema.json", "README.md"],
   "engines": { "node": ">=18.15.0", "homebridge": ">=1.8.0" },
   "keywords": ["homebridge-plugin", "bedjet"],
   "scripts": {

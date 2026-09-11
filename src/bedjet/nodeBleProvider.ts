@@ -30,6 +30,15 @@ export function createNodeBleProvider(): BleProvider & { destroy(): void } {
         }
       }
       const device = await adapter.waitDevice(mac, WAIT_DEVICE_TIMEOUT_MS);
+      try {
+        // Stop scanning once we've found the device: continuous discovery
+        // shares the Pi's single BLE radio with the connection attempt and
+        // degrades stability. The next reconnect calls connect() again,
+        // which restarts discovery (via the isDiscovering() check above).
+        await adapter.stopDiscovery();
+      } catch {
+        // Not discovering (e.g. another process already stopped it).
+      }
       await device.connect();
       const gatt = await device.gatt();
       return {

@@ -147,6 +147,14 @@ export class BedJetTransport extends EventEmitter {
       this.commandChar = await connection.getCharacteristic(BEDJET_SERVICE_UUID, COMMAND_CHAR_UUID);
       this.backoffMs = INITIAL_BACKOFF_MS;
       this.lastStatusAt = Date.now();
+      // A stray timer can still be pending here if this success came from a
+      // recycle that superseded an earlier failed attempt (e.g. a direct
+      // recycleNow() call from write()'s retry path) — left alone, it would
+      // fire later and needlessly recycle this healthy connection.
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
       this.setState('READY');
       this.log('connected to BedJet');
     } catch (err) {

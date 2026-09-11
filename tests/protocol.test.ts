@@ -67,6 +67,20 @@ describe('parseStatus', () => {
     expect(parseStatus(makeStatusPacket().subarray(0, 10))).toBeNull();
   });
 
+  it('rejects an 18-byte packet and parses a 19-byte packet (exact length boundary)', () => {
+    expect(parseStatus(makeStatusPacket().subarray(0, 18))).toBeNull();
+    expect(parseStatus(makeStatusPacket().subarray(0, 19))).toEqual({
+      mode: BedJetMode.Heat,
+      currentTempC: 29,
+      targetTempC: 33,
+      ambientTempC: 26,
+      fanStep: 7,
+      minTempC: 19,
+      maxTempC: 43,
+      secondsRemaining: 5400,
+    });
+  });
+
   it('rejects non-status packet types and formats', () => {
     const wrongFormat = makeStatusPacket();
     wrongFormat[1] = 0x05; // PACKET_FORMAT_DEBUG

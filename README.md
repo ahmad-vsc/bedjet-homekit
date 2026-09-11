@@ -71,6 +71,10 @@ connection after this much status silence; `"maxReconnectBackoffSeconds": 60`.
 ## Verification checklist (after install)
 
 - [ ] BedJet appears in the Home app as Thermostat + Fan
+  (note: the Thermostat tile's "current temperature" is the BedJet's outlet
+  air temperature — the air it's blowing, per the device's own sensor — so
+  expect ~35-40°C readings while heating; this matches the BedJet app's
+  behavior, not room temperature)
 - [ ] Set Heat + a target temperature → BedJet starts heating
 - [ ] Change fan speed from the Fan tile → BedJet fan changes
 - [ ] Turn off from Home app → BedJet stops

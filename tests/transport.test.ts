@@ -7,7 +7,11 @@ import { makeStatusPacket } from './fixtures';
 // Fake timers for backoff/watchdog, but leave microtasks/setImmediate real
 // so async plumbing still flows.
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'Date'] });
+  // clearTimeout/clearInterval must be faked too, or calling them on a fake
+  // timer handle (as the transport does in stop()/recycleNow()) is a silent
+  // no-op against the real timer implementation, letting "cleared" timers
+  // fire anyway once fake time is advanced.
+  vi.useFakeTimers({ toFake: ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'Date'] });
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -142,6 +146,38 @@ describe('BedJetTransport connection lifecycle', () => {
     expect(states).not.toContain('READY');
     expect(ble.connections).toHaveLength(1);
     expect(ble.connections[0].disconnected).toBe(true); // zombie was disconnected
+  });
+
+  it('clears a stray reconnect timer once a superseding recycle succeeds', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    expect(t.state).toBe('READY');
+    expect(ble.connections).toHaveLength(1);
+
+    // A reconnect attempt fails and schedules a 1s backoff retry timer.
+    ble.failNextConnects = 1;
+    ble.current.dropConnection();
+    await flush();
+    expect(t.state).toBe('DISCONNECTED');
+
+    // Before that timer fires, a separate recycle attempt supersedes it and
+    // succeeds — e.g. write()'s retry path calling recycleNow() directly,
+    // bypassing the queue the same way the real write-failure retry does.
+    // Reaching into the private method models that race deterministically.
+    await (t as unknown as { recycleNow(): Promise<void> }).recycleNow();
+    await flush();
+    expect(t.state).toBe('READY');
+    expect(ble.connections).toHaveLength(2);
+
+    // Advance past the ORIGINAL (now-stale) backoff delay. Without the fix,
+    // the stray timer fires and needlessly recycles the healthy connection.
+    await vi.advanceTimersByTimeAsync(1000);
+    await flush();
+    expect(ble.connections).toHaveLength(2); // no extra reconnect
+    expect(t.state).toBe('READY');
+    await t.stop();
   });
 
   it('ignores a duplicate/stale disconnect event for the same connection', async () => {

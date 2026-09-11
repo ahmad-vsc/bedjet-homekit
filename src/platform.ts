@@ -30,9 +30,9 @@ export class BedJetPlatform implements DynamicPlatformPlugin {
     this.Characteristic = api.hap.Characteristic;
     api.on('didFinishLaunching', () => this.startDevices());
     api.on('shutdown', () => {
-      for (const cleanup of this.cleanups) {
-        void cleanup();
-      }
+      // Kick off every transport's stop() together and let them settle as a
+      // batch, rather than firing-and-forgetting one cleanup at a time.
+      void Promise.allSettled(this.cleanups.map((c) => Promise.resolve(c())));
     });
   }
 
@@ -49,6 +49,10 @@ export class BedJetPlatform implements DynamicPlatformPlugin {
     const valid: BedJetDeviceConfig[] = [];
     const seen = new Set<string>();
     for (const device of devices) {
+      if (!device || typeof device !== 'object') {
+        this.log.error('Ignoring invalid entry in devices config');
+        continue;
+      }
       const label = device.name || device.mac || '(unnamed)';
       if (typeof device.mac !== 'string' || !MAC_RE.test(device.mac)) {
         this.log.error(
@@ -78,8 +82,10 @@ export class BedJetPlatform implements DynamicPlatformPlugin {
 
       const provider = createNodeBleProvider();
       const transport = new BedJetTransport(provider, device.mac, {
-        statusTimeoutMs: ((this.config.statusTimeoutSeconds as number) ?? 300) * 1000,
-        maxBackoffMs: ((this.config.maxReconnectBackoffSeconds as number) ?? 60) * 1000,
+        // Clamp to the schema minimums: a hand-edited config below these
+        // would make the watchdog recycle the connection in a tight loop.
+        statusTimeoutMs: Math.max(60, Number(this.config.statusTimeoutSeconds) || 300) * 1000,
+        maxBackoffMs: Math.max(5, Number(this.config.maxReconnectBackoffSeconds) || 60) * 1000,
         log: (msg) => this.log.info(`[${device.name}] ${msg}`),
       });
       const client = new BedJetClient(transport);

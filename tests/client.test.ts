@@ -8,7 +8,12 @@ import { makeStatusPacket } from './fixtures';
 class FakeTransport extends EventEmitter {
   state: TransportState = 'READY';
   writes: Array<{ data: number[]; key?: string }> = [];
+  failNextWrite = false;
   async write(data: Buffer, coalesceKey?: string): Promise<void> {
+    if (this.failNextWrite) {
+      this.failNextWrite = false;
+      throw new Error('BedJet is not connected');
+    }
     this.writes.push({ data: [...data], key: coalesceKey });
   }
 }
@@ -43,6 +48,14 @@ describe('BedJetClient commands', () => {
       [0x03, 38],
     ]);
     expect(transport.writes[0].key).toBe('temp');
+  });
+
+  it('propagates a transport write rejection as an honest error', async () => {
+    const { transport, client } = setup();
+    transport.failNextWrite = true;
+    // The accessory layer converts this to a HapStatusError (5 lines,
+    // verified on-Pi); here we prove the rejection isn't swallowed en route.
+    await expect(client.setMode('heat')).rejects.toThrow();
   });
 
   it('uses device-reported temp limits once a status arrives', async () => {
