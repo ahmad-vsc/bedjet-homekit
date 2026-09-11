@@ -85,10 +85,27 @@ describe('BedJetClient state', () => {
     expect(client.snapshot?.targetTempC).toBe(33);
   });
 
-  it('ignores unparseable notifications', () => {
+  it('ignores unparseable notifications (keeps the idle default, not the bad packet)', () => {
     const { transport, client } = setup();
     transport.emit('status', Buffer.from([0, 5, 0, 2])); // debug packet
+    // READY-but-no-real-status → reachable idle Off snapshot, and the bad
+    // packet never became state.
+    expect(client.snapshot?.reachable).toBe(true);
+    expect(client.snapshot?.mode).toBe(BedJetMode.Standby);
+  });
+
+  it('reports null only when disconnected and never heard from', () => {
+    const { transport, client } = setup();
+    transport.state = 'DISCONNECTED';
     expect(client.snapshot).toBeNull();
+  });
+
+  it('presents a reachable idle Off snapshot when connected before any status', () => {
+    const { client } = setup(); // FakeTransport defaults to READY
+    const snap = client.snapshot;
+    expect(snap?.reachable).toBe(true);
+    expect(snap?.mode).toBe(BedJetMode.Standby);
+    expect(snap?.fanStep).toBe(0);
   });
 
   it('marks the snapshot unreachable when the transport drops', () => {

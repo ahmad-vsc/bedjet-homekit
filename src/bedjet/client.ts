@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import {
-  BedJetStatus, Button, buildButtonPacket, buildSetFanPacket, buildSetTempPacket,
+  BedJetMode, BedJetStatus, Button, buildButtonPacket, buildSetFanPacket, buildSetTempPacket,
   parseStatus, percentToFanStep,
 } from './protocol';
 import { TransportState } from './transport';
@@ -24,6 +24,20 @@ export interface TransportLike {
 const DEFAULT_MIN_TEMP_C = 19;
 const DEFAULT_MAX_TEMP_C = 43;
 
+// Shown while connected but the (idle, silent) BedJet hasn't reported yet.
+// It lets HomeKit render controllable Off tiles instead of "No Response";
+// turning the unit on produces real notifications that replace this.
+const IDLE_STATUS: BedJetStatus = {
+  mode: BedJetMode.Standby,
+  currentTempC: DEFAULT_MIN_TEMP_C,
+  targetTempC: DEFAULT_MIN_TEMP_C,
+  ambientTempC: DEFAULT_MIN_TEMP_C,
+  fanStep: 0,
+  minTempC: DEFAULT_MIN_TEMP_C,
+  maxTempC: DEFAULT_MAX_TEMP_C,
+  secondsRemaining: 0,
+};
+
 const BUTTON_FOR_MODE: Record<SimpleMode, Button> = {
   off: Button.Off,
   heat: Button.Heat,
@@ -41,10 +55,17 @@ export class BedJetClient extends EventEmitter {
   }
 
   get snapshot(): BedJetSnapshot | null {
-    if (!this.lastStatus) {
-      return null;
+    // Once we have real status, report it (with live reachability).
+    if (this.lastStatus) {
+      return { ...this.lastStatus, reachable: this.transport.state === 'READY' };
     }
-    return { ...this.lastStatus, reachable: this.transport.state === 'READY' };
+    // Connected but the idle BedJet hasn't spoken yet: present a reachable
+    // Off device so the tiles are controllable (turning it on seeds real state).
+    if (this.transport.state === 'READY') {
+      return { ...IDLE_STATUS, reachable: true };
+    }
+    // Not connected and never heard from: honestly unreachable.
+    return null;
   }
 
   async setMode(mode: SimpleMode): Promise<void> {
