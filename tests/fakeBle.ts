@@ -51,11 +51,26 @@ export class FakeConnection implements BleConnection {
 export class FakeBleProvider implements BleProvider {
   public connections: FakeConnection[] = [];
   public failNextConnects = 0;
+  /** Opt-in: connect() never resolves on its own; caller drives it via pendingConnects. */
+  public manualConnect = false;
+  public pendingConnects: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 
   async connect(_mac: string): Promise<BleConnection> {
     if (this.failNextConnects > 0) {
       this.failNextConnects--;
       throw new Error('le-connection-abort-by-local');
+    }
+    if (this.manualConnect) {
+      return new Promise<BleConnection>((resolve, reject) => {
+        this.pendingConnects.push({
+          resolve: () => {
+            const conn = new FakeConnection();
+            this.connections.push(conn);
+            resolve(conn);
+          },
+          reject,
+        });
+      });
     }
     const conn = new FakeConnection();
     this.connections.push(conn);

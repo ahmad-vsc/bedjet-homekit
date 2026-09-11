@@ -80,7 +80,10 @@ export class BedJetTransport extends EventEmitter {
       clearInterval(this.watchdog);
       this.watchdog = null;
     }
-    await this.teardown();
+    // Serialize with any in-flight/pending recycleNow() so we never tear down
+    // out from under a connect that's still resolving; also coalesces away
+    // any still-pending recycle entry.
+    await this.queue.enqueue(() => this.teardown(), 'recycle');
     this.setState('DISCONNECTED');
   }
 
@@ -93,12 +96,23 @@ export class BedJetTransport extends EventEmitter {
     if (this.stopped) {
       return;
     }
-    await this.teardown();
-    this.setState('CONNECTING');
     try {
+      await this.teardown();
+      this.setState('CONNECTING');
       const connection = await this.ble.connect(this.mac);
+      if (this.stopped) {
+        // stop() ran while we were suspended waiting on connect(); this
+        // connection was never ours to keep. Disconnect it and bail out
+        // without touching state or this.connection.
+        try {
+          await connection.disconnect();
+        } catch {
+          // Already gone — that's fine.
+        }
+        return;
+      }
       this.connection = connection;
-      connection.onDisconnect(() => this.onUnsolicitedDisconnect());
+      connection.onDisconnect(() => this.onUnsolicitedDisconnect(connection));
       this.setState('SUBSCRIBING');
       const statusChar = await connection.getCharacteristic(BEDJET_SERVICE_UUID, STATUS_CHAR_UUID);
       await statusChar.subscribe((data) => this.onStatus(data));
@@ -126,11 +140,15 @@ export class BedJetTransport extends EventEmitter {
     }
   }
 
-  private onUnsolicitedDisconnect(): void {
-    if (this.stopped || this.stateValue === 'CONNECTING') {
+  private onUnsolicitedDisconnect(connection: BleConnection): void {
+    // Tied to connection identity, not state: BLE stacks can fire disconnect
+    // more than once for a single physical event, and a stale connection's
+    // late event must not recycle a healthy newer connection.
+    if (this.stopped || connection !== this.connection) {
       return;
     }
     this.log('BedJet disconnected; reconnecting');
+    this.connection = null;
     this.commandChar = null;
     this.setState('DISCONNECTED');
     this.enqueueRecycle();

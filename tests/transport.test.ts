@@ -122,4 +122,41 @@ describe('BedJetTransport connection lifecycle', () => {
     await flush();
     expect(ble.connections).toHaveLength(1); // no zombie reconnects
   });
+
+  it('stop() during an in-flight connect prevents the zombie connection from becoming READY', async () => {
+    const ble = new FakeBleProvider();
+    ble.manualConnect = true;
+    const t = makeTransport(ble);
+    const states: string[] = [];
+    t.on('state', (s: string) => states.push(s));
+    t.start();
+    await flush();
+    expect(ble.pendingConnects).toHaveLength(1); // suspended at ble.connect()
+
+    const stopping = t.stop();
+    ble.pendingConnects[0].resolve(); // connect resolves after stop() has run
+    await flush();
+    await stopping;
+
+    expect(t.state).toBe('DISCONNECTED');
+    expect(states).not.toContain('READY');
+    expect(ble.connections).toHaveLength(1);
+    expect(ble.connections[0].disconnected).toBe(true); // zombie was disconnected
+  });
+
+  it('ignores a duplicate/stale disconnect event for the same connection', async () => {
+    const ble = new FakeBleProvider();
+    const t = makeTransport(ble);
+    t.start();
+    await flush();
+    expect(t.state).toBe('READY');
+
+    ble.connections[0].dropConnection();
+    ble.connections[0].dropConnection(); // stale second event for the same connection
+    await flush();
+
+    expect(ble.connections).toHaveLength(2); // exactly one reconnect
+    expect(t.state).toBe('READY');
+    await t.stop();
+  });
 });
