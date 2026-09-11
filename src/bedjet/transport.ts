@@ -5,6 +5,7 @@ import { OperationQueue } from './queue';
 export interface BleCharacteristic {
   write(data: Buffer): Promise<void>;
   subscribe(onData: (data: Buffer) => void): Promise<void>;
+  read(): Promise<Buffer>;
 }
 
 export interface BleConnection {
@@ -145,6 +146,18 @@ export class BedJetTransport extends EventEmitter {
       const statusChar = await connection.getCharacteristic(BEDJET_SERVICE_UUID, STATUS_CHAR_UUID);
       await statusChar.subscribe((data) => this.onStatus(data));
       this.commandChar = await connection.getCharacteristic(BEDJET_SERVICE_UUID, COMMAND_CHAR_UUID);
+      // The BedJet barely notifies while idle, so without an explicit initial
+      // read the accessory would have no state (and report unreachable) until
+      // the device is turned on at the unit. Failure is tolerable: a
+      // notification will seed state instead once the device speaks.
+      try {
+        const initial = await statusChar.read();
+        if (initial.length > 0) {
+          this.onStatus(initial);
+        }
+      } catch {
+        this.log('initial status read failed; waiting for notifications');
+      }
       this.backoffMs = INITIAL_BACKOFF_MS;
       this.lastStatusAt = Date.now();
       // A stray timer can still be pending here if this success came from a

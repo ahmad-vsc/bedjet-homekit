@@ -320,6 +320,43 @@ describe('BedJetTransport write path', () => {
   });
 });
 
+describe('BedJetTransport initial status read', () => {
+  it('seeds state by reading the status characteristic after subscribing', async () => {
+    const ble = new FakeBleProvider();
+    ble.manualConnect = true;
+    const t = makeTransport(ble);
+    const received: Buffer[] = [];
+    t.on('status', (b: Buffer) => received.push(b));
+    t.start();
+    await flush();
+    const conn = new FakeConnection();
+    conn.statusChar.readValue = makeStatusPacket();
+    ble.pendingConnects.shift()!.resolve(conn);
+    await flush();
+    expect(t.state).toBe('READY');
+    expect(received).toHaveLength(1); // read-seeded, no notification needed
+    expect(received[0][1]).toBe(0x56);
+    await t.stop();
+  });
+
+  it('still reaches READY when the initial read fails', async () => {
+    const ble = new FakeBleProvider();
+    ble.manualConnect = true;
+    const t = makeTransport(ble);
+    const received: Buffer[] = [];
+    t.on('status', (b: Buffer) => received.push(b));
+    t.start();
+    await flush();
+    const conn = new FakeConnection();
+    conn.statusChar.failReads = true;
+    ble.pendingConnects.shift()!.resolve(conn);
+    await flush();
+    expect(t.state).toBe('READY');
+    expect(received).toHaveLength(0);
+    await t.stop();
+  });
+});
+
 describe('BedJetTransport status watchdog', () => {
   it('recycles the connection after status silence', async () => {
     const ble = new FakeBleProvider();

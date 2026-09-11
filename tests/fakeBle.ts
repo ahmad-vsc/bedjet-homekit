@@ -18,6 +18,17 @@ export class FakeCharacteristic implements BleCharacteristic {
     this.onData = onData;
   }
 
+  /** Value returned by read(); empty by default (device silent/idle). */
+  public readValue: Buffer = Buffer.alloc(0);
+  public failReads = false;
+
+  async read(): Promise<Buffer> {
+    if (this.failReads) {
+      throw new Error('read not permitted');
+    }
+    return this.readValue;
+  }
+
   /** Simulates the BedJet pushing a status notification. */
   notify(data: Buffer): void {
     this.onData?.(data);
