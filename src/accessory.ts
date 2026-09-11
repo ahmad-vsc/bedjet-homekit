@@ -12,6 +12,15 @@ const HK_COOL = 2;
 const HK_MIN_TEMP_C = 19;
 const HK_MAX_TEMP_C = 43;
 
+// "Cool preset": switching the thermostat to Cool also applies these, so the
+// user gets a consistent starting point without setting fan/temp by hand.
+const COOL_PRESET_FAN_PERCENT = 40;
+const COOL_PRESET_TEMP_F = 66;
+
+function fahrenheitToCelsius(f: number): number {
+  return (f - 32) / 1.8;
+}
+
 export function modeToHCState(mode: BedJetMode): 0 | 1 | 2 {
   switch (mode) {
     case BedJetMode.Heat:
@@ -62,7 +71,7 @@ export class BedJetAccessory {
     this.thermostat.getCharacteristic(Characteristic.TargetHeatingCoolingState)
       .setProps({ validValues: [HK_OFF, HK_HEAT, HK_COOL] })
       .onGet(() => modeToHCState(this.requireSnapshot().mode))
-      .onSet((value) => this.send(() => this.client.setMode(hcStateToSimpleMode(value as number))));
+      .onSet((value) => this.send(() => this.applyMode(hcStateToSimpleMode(value as number))));
 
     this.thermostat.getCharacteristic(Characteristic.CurrentHeatingCoolingState)
       .onGet(() => modeToHCState(this.requireSnapshot().mode));
@@ -92,6 +101,18 @@ export class BedJetAccessory {
       .onSet((value) => this.setFanSpeed(value));
 
     client.on('state', (snap: BedJetSnapshot) => this.pushState(snap));
+  }
+
+  /**
+   * Sets the operating mode from the thermostat. Selecting Cool also applies the
+   * cool preset (fan speed + target temp) so it starts at a consistent setting.
+   */
+  private async applyMode(mode: SimpleMode): Promise<void> {
+    await this.client.setMode(mode);
+    if (mode === 'cool') {
+      await this.client.setFanPercent(COOL_PRESET_FAN_PERCENT);
+      await this.client.setTargetTemp(fahrenheitToCelsius(COOL_PRESET_TEMP_F));
+    }
   }
 
   /** Fan tile on: start fan-only Cool if the BedJet is idle. Off: BedJet off. */
